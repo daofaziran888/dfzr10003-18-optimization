@@ -1,4 +1,8 @@
-"""质量探针接口：维护质量规则，覆盖启动校验、暂停校验、归档规则等动作。"""
+"""质量探针接口：维护质量规则，覆盖启动校验、暂停校验、归档规则等动作。
+
+阈值版本走准入复核链路：提交 → 复核 → 生效；采样留档与告警确认状态
+与监控页共享同一份结论。
+"""
 from __future__ import annotations
 
 from typing import Any
@@ -30,6 +34,13 @@ def list_entries(
     return PageResult(items=items, total=total, page=page, size=size)
 
 
+@router.get("/export")
+def export_entries() -> dict[str, Any]:
+    """导出质量探针清单：返回当前过滤条件下的全量数据。"""
+    items, total = service.list_entries(page=1, size=10000)
+    return {"module": "quality", "total": total, "items": items}
+
+
 @router.get("/{entry_id}", response_model=dict)
 def get_entry(entry_id: int) -> dict:
     """读取单条质量规则明细；不存在时给出可读的错误说明。"""
@@ -58,8 +69,39 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     return ActionResult(ok=True, message=message, entry=entry)
 
 
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出质量探针清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "quality", "total": total, "items": items}
+@router.get("/{entry_id}/thresholds")
+def list_thresholds(entry_id: int) -> dict[str, Any]:
+    """列出规则的阈值版本：生效中、待复核与被覆盖留档的版本都在，供核对。"""
+    versions, message = service.list_thresholds(entry_id)
+    if versions is None:
+        raise HTTPException(status_code=404, detail=message)
+    return {"items": versions, "total": len(versions)}
+
+
+@router.post("/{entry_id}/thresholds", response_model=ActionResult)
+def submit_threshold(entry_id: int, payload: EntryPayload) -> ActionResult:
+    """提交新阈值版本：先进入准入复核，复核通过并到达生效时间后才影响新读数。"""
+    version, message = service.submit_threshold(entry_id, payload.values)
+    if version is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=True, message=message, entry=version)
+
+
+@router.post("/{entry_id}/thresholds/{version_id}/review", response_model=ActionResult)
+def review_threshold(entry_id: int, version_id: int, payload: EntryPayload) -> ActionResult:
+    """复核阈值版本：approve=true 通过、false 驳回；不完整版本复核不通过且保持原版本生效。"""
+    approve = bool(payload.values.get("approve", True))
+    reviewer = str(payload.values.get("reviewer") or "质量值班")
+    version, message, ok = service.review_threshold(version_id, approve, reviewer)
+    if version is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=ok, message=message, entry=version)
+
+
+@router.get("/{entry_id}/samples")
+def list_samples(entry_id: int) -> dict[str, Any]:
+    """采样留档：每条读数记录判定时刻命中的阈值版本，历史读数不随阈值切换重判。"""
+    samples, message = service.list_samples(entry_id)
+    if samples is None:
+        raise HTTPException(status_code=404, detail=message)
+    return {"items": samples, "total": len(samples)}

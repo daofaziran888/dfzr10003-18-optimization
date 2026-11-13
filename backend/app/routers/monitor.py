@@ -1,4 +1,8 @@
-"""运行监控面板接口：维护监控指标，覆盖启动监控、暂停监控、归档指标等动作。"""
+"""运行监控面板接口：维护监控指标，覆盖启动监控、暂停监控、归档指标等动作。
+
+监控清单的阈值生效结论与告警确认状态来自共享治理服务，与质量页同口径；
+告警确认幂等，并发提交只有一次有效。
+"""
 from __future__ import annotations
 
 from typing import Any
@@ -30,6 +34,37 @@ def list_entries(
     return PageResult(items=items, total=total, page=page, size=size)
 
 
+@router.get("/export")
+def export_entries() -> dict[str, Any]:
+    """导出运行监控面板清单：返回当前过滤条件下的全量数据。"""
+    items, total = service.list_entries(page=1, size=10000)
+    return {"module": "monitor", "total": total, "items": items}
+
+
+@router.get("/alerts")
+def list_alerts(metric: str | None = Query(default=None, description="按指标编号过滤")) -> dict[str, Any]:
+    """告警清单：同一规则、同一批次、同一越界区间只保留一条。"""
+    items = service.list_alerts(metric_code=metric)
+    return {"items": items, "total": len(items)}
+
+
+@router.post("/alerts/{alert_id}/ack", response_model=ActionResult)
+def ack_alert(alert_id: int, payload: EntryPayload) -> ActionResult:
+    """确认告警：重复提交幂等，并发提交只有一次有效，已确认区间不再提醒。"""
+    operator = str(payload.values.get("operator") or "质量值班")
+    alert, message, ok = service.ack_alert(alert_id, operator)
+    if alert is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=ok, message=message, entry=alert)
+
+
+@router.get("/samples")
+def list_samples(metric: str | None = Query(default=None, description="按指标编号过滤")) -> dict[str, Any]:
+    """监控采样留档：每条读数记录命中阈值版本与判定结果。"""
+    items = service.list_samples(metric_code=metric)
+    return {"items": items, "total": len(items)}
+
+
 @router.get("/{entry_id}", response_model=dict)
 def get_entry(entry_id: int) -> dict:
     """读取单条监控指标明细；不存在时给出可读的错误说明。"""
@@ -58,8 +93,10 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     return ActionResult(ok=True, message=message, entry=entry)
 
 
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出运行监控面板清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "monitor", "total": total, "items": items}
+@router.post("/{entry_id}/samples", response_model=ActionResult)
+def record_sample(entry_id: int, payload: EntryPayload) -> ActionResult:
+    """写入一条监控采样：按采样时刻命中的已复核阈值版本判定，越界才触发告警。"""
+    sample, message = service.record_sample(entry_id, payload.values)
+    if sample is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=True, message=message, entry=sample)

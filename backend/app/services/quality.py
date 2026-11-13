@@ -1,8 +1,13 @@
-"""质量探针业务规则：状态流转、字段校验与筛选口径都收在这里。"""
+"""质量探针业务规则：状态流转、字段校验与筛选口径都收在这里。
+
+阈值版本、采样判定与告警确认口径统一走 ``threshold_governance``，
+质量页只展示共享结论，不在本模块单独切换判断口径。
+"""
 from __future__ import annotations
 
 from typing import Any
 
+from app.services.threshold import threshold_governance
 from app.store import store
 
 MODULE = "quality"
@@ -28,10 +33,13 @@ class QualityService:
             rows = [row for row in rows if row.get("status") == status]
         total = len(rows)
         start = max(page - 1, 0) * size
-        return rows[start:start + size], total
+        return [self._with_conclusion(row) for row in rows[start:start + size]], total
 
     def get_entry(self, entry_id: int) -> dict[str, Any] | None:
-        return store.find(MODULE, entry_id)
+        entry = store.find(MODULE, entry_id)
+        if entry is None:
+            return None
+        return self._with_conclusion(entry)
 
     def create_entry(self, values: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
         missing = [field for field in REQUIRED_FIELDS if not str(values.get(field) or "").strip()]
@@ -59,3 +67,37 @@ class QualityService:
         entry["pending"] = target != STATUS_ORDER[-1]
         entry["abnormal"] = action in NEGATIVE_ACTIONS
         return entry, f"质量规则已{action}"
+
+    # ---------- 阈值版本治理（共享口径，委托给 threshold_governance） ----------
+    def list_thresholds(self, entry_id: int) -> tuple[list[dict[str, Any]] | None, str]:
+        entry = store.find(MODULE, entry_id)
+        if entry is None:
+            return None, f"质量规则 {entry_id} 不存在或已归档"
+        versions = threshold_governance.list_versions(str(entry.get("规则编号", "")))
+        return versions, ""
+
+    def submit_threshold(
+        self, entry_id: int, values: dict[str, Any]
+    ) -> tuple[dict[str, Any] | None, str]:
+        entry = store.find(MODULE, entry_id)
+        if entry is None:
+            return None, f"质量规则 {entry_id} 不存在或已归档"
+        return threshold_governance.submit_version(str(entry.get("规则编号", "")), values)
+
+    def review_threshold(
+        self, version_id: int, approve: bool, reviewer: str
+    ) -> tuple[dict[str, Any] | None, str, bool]:
+        return threshold_governance.review_version(version_id, approve, reviewer)
+
+    def list_samples(self, entry_id: int) -> tuple[list[dict[str, Any]] | None, str]:
+        entry = store.find(MODULE, entry_id)
+        if entry is None:
+            return None, f"质量规则 {entry_id} 不存在或已归档"
+        samples = threshold_governance.list_samples(str(entry.get("规则编号", "")))
+        return samples, ""
+
+    def _with_conclusion(self, row: dict[str, Any]) -> dict[str, Any]:
+        """给列表/明细行注入共享阈值结论；拷贝成行，不回写存储层。"""
+        merged = dict(row)
+        merged.update(threshold_governance.conclusion_for_rule(str(row.get("规则编号", ""))))
+        return merged

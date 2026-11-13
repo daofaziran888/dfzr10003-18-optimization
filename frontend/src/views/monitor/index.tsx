@@ -11,32 +11,16 @@ const columns = [
   "告警阈值",
   "采样周期",
   "最近数值",
-  "监控状态"
+  "监控状态",
+  "阈值版本",
+  "越界区间",
+  "确认状态",
+  "阈值生效结论"
 ]
 const actions = [
   "启动监控",
   "暂停监控",
   "归档指标"
-]
-const statuses = [
-  "草稿",
-  "运行中",
-  "已暂停",
-  "已归档"
-]
-const stats = [
-  {
-    "label": "监控指标总数",
-    "value": 0
-  },
-  {
-    "label": "运行中监控",
-    "value": 0
-  },
-  {
-    "label": "已暂停监控",
-    "value": 0
-  }
 ]
 
 type Row = Record<string, string | number | null>
@@ -45,8 +29,15 @@ export default function MonitorView() {
   const [rows, setRows] = useState<Row[]>([])
   const [total, setTotal] = useState(0)
   const [errorMessage, setErrorMessage] = useState('')
+  const [noticeMessage, setNoticeMessage] = useState('')
   const [filters, setFilters] = useState<Record<string, string>>({})
   const filterFields = useMemo(() => columns.slice(0, 3), [])
+
+  const stats = useMemo(() => ([
+    { label: '监控指标总数', value: total },
+    { label: '运行中监控', value: rows.filter((row) => row.status === '运行中').length },
+    { label: '未确认告警', value: rows.filter((row) => row.确认状态 === '未确认').length },
+  ]), [rows, total])
 
   const reload = useCallback(async () => {
     setErrorMessage('')
@@ -70,17 +61,43 @@ export default function MonitorView() {
 
   async function runAction(action: string, row: Row) {
     setErrorMessage('')
+    setNoticeMessage('')
     try {
       const response = await request(`${ENDPOINT}/${row.id}/actions`, {
         method: 'POST',
-        body: JSON.stringify({ action }),
+        body: JSON.stringify({ values: { action } }),
       })
-      if (!response.ok) {
-        throw new Error('运行监控面板动作未生效，请稍后重试')
+      const payload = await response.json()
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.message ?? '运行监控面板动作未生效，请稍后重试')
       }
+      setNoticeMessage(payload.message ?? '运行监控面板操作完成')
       await reload()
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : '运行监控面板操作失败')
+    }
+  }
+
+  async function ackAlert(row: Row) {
+    setErrorMessage('')
+    setNoticeMessage('')
+    if (row.告警ID === null || row.告警ID === undefined) {
+      setErrorMessage('该指标当前没有待确认告警')
+      return
+    }
+    try {
+      const response = await request(`${ENDPOINT}/alerts/${row.告警ID}/ack`, {
+        method: 'POST',
+        body: JSON.stringify({ values: { operator: '值班管理员' } }),
+      })
+      const payload = await response.json()
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.message ?? '告警确认未生效，请稍后重试')
+      }
+      setNoticeMessage(payload.message ?? '告警已确认')
+      await reload()
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : '告警确认失败')
     }
   }
 
@@ -135,13 +152,26 @@ export default function MonitorView() {
         <tbody>
           {rows.map((row) => (
             <tr key={String(row.id)}>
-              {columns.map((column) => <td key={column}>{row[column] ?? '—'}</td>)}
+              {columns.map((column) => (
+                <td key={column}>
+                  {column === '确认状态' ? (
+                    <span className={`tag ${row[column] === '未确认' ? 'warn' : 'ok'}`}>{row[column] ?? '—'}</span>
+                  ) : (
+                    row[column] ?? '—'
+                  )}
+                </td>
+              ))}
               <td className="row-actions">
                 {actions.map((action) => (
                   <button key={action} className="link" type="button" onClick={() => void runAction(action, row)}>
                     {action}
                   </button>
                 ))}
+                {row.确认状态 === '未确认' && (
+                  <button className="link" type="button" onClick={() => void ackAlert(row)}>
+                    确认告警{row.告警编号 ? ` ${row.告警编号}` : ''}
+                  </button>
+                )}
               </td>
             </tr>
           ))}
@@ -155,6 +185,7 @@ export default function MonitorView() {
 
       <footer className="page-foot">
         <span>共 {total} 条运行监控面板记录</span>
+        {noticeMessage && <span className="notice-text">{noticeMessage}</span>}
         {errorMessage && <span className="error-text">{errorMessage}</span>}
       </footer>
     </section>

@@ -1,8 +1,14 @@
-"""运行监控面板业务规则：状态流转、字段校验与筛选口径都收在这里。"""
+"""运行监控面板业务规则：状态流转、字段校验与筛选口径都收在这里。
+
+监控清单的阈值生效结论、越界区间与告警确认状态统一从
+``threshold_governance`` 读取，与质量页保持同一份口径；
+监控采样判定也走治理服务，不再直接引用行内静态阈值。
+"""
 from __future__ import annotations
 
 from typing import Any
 
+from app.services.threshold import threshold_governance
 from app.store import store
 
 MODULE = "monitor"
@@ -28,10 +34,13 @@ class MonitorService:
             rows = [row for row in rows if row.get("status") == status]
         total = len(rows)
         start = max(page - 1, 0) * size
-        return rows[start:start + size], total
+        return [self._with_conclusion(row) for row in rows[start:start + size]], total
 
     def get_entry(self, entry_id: int) -> dict[str, Any] | None:
-        return store.find(MODULE, entry_id)
+        entry = store.find(MODULE, entry_id)
+        if entry is None:
+            return None
+        return self._with_conclusion(entry)
 
     def create_entry(self, values: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
         missing = [field for field in REQUIRED_FIELDS if not str(values.get(field) or "").strip()]
@@ -59,3 +68,39 @@ class MonitorService:
         entry["pending"] = target != STATUS_ORDER[-1]
         entry["abnormal"] = action in NEGATIVE_ACTIONS
         return entry, f"监控指标已{action}"
+
+    # ---------- 告警与采样（共享口径，委托给 threshold_governance） ----------
+    def list_alerts(self, metric_code: str | None = None) -> list[dict[str, Any]]:
+        return threshold_governance.list_alerts(metric_code=metric_code)
+
+    def ack_alert(self, alert_id: int, operator: str) -> tuple[dict[str, Any] | None, str, bool]:
+        return threshold_governance.ack_alert(alert_id, operator)
+
+    def list_samples(self, metric_code: str | None = None) -> list[dict[str, Any]]:
+        samples = threshold_governance.list_samples()
+        if metric_code:
+            samples = [row for row in samples if row.get("指标编号") == metric_code]
+        return samples
+
+    def record_sample(
+        self, entry_id: int, values: dict[str, Any]
+    ) -> tuple[dict[str, Any] | None, str]:
+        entry = store.find(MODULE, entry_id)
+        if entry is None:
+            return None, f"监控指标 {entry_id} 不存在或已归档"
+        rule_code = str(entry.get("关联规则") or "").strip()
+        if not rule_code:
+            return None, f"监控指标 {entry.get('指标编号')} 未关联质量规则，采样未写入"
+        return threshold_governance.record_sample(
+            rule_code,
+            str(entry.get("指标编号", "")),
+            str(values.get("批次") or "").strip(),
+            str(values.get("采样时间") or "").strip(),
+            values.get("采样值"),
+        )
+
+    def _with_conclusion(self, row: dict[str, Any]) -> dict[str, Any]:
+        """给清单行注入共享阈值生效结论；拷贝成行，不回写存储层。"""
+        merged = dict(row)
+        merged.update(threshold_governance.conclusion_for_metric(str(row.get("指标编号", ""))))
+        return merged

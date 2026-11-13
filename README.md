@@ -73,5 +73,17 @@ npm run dev
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
 
+## 质量阈值治理（quality ↔ monitor 共享口径）
+
+- 阈值版本、监控采样与告警的共享口径集中在 `backend/app/services/threshold.py`，
+  质量页与监控页都从这里取结论，任何页面不得单独切换判断口径。
+- 新阈值版本先进入准入复核（`POST /api/quality/{id}/thresholds` →
+  `POST /api/quality/{id}/thresholds/{version_id}/review`），复核通过且到达生效时间后
+  只影响之后采集的读数；历史读数按判定时的版本留档（`GET /api/quality/{id}/samples`）。
+- 同一采样时刻被多个版本覆盖时，按生效时间 → 复核序号（审批顺序）→ 完整度取
+  已复核且完整的一版，被覆盖版本留档核对；不完整版本复核不通过，保持原版本生效。
+- 告警按（规则编号、批次、越界区间）去重，确认接口 `POST /api/monitor/alerts/{id}/ack`
+  幂等且并发安全，已确认区间不再重复提醒；监控清单行内展示阈值生效结论与确认状态。
+
 领域：数据工程
 子方向：数仓与数据湖
